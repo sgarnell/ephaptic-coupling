@@ -1,0 +1,7 @@
+{
+  "python.defaultInterpreterPath": "C:/Users/saulg/miniconda3/envs/ephaptic-env/python.exe",
+  "python.condaPath": "C:/Users/saulg/miniconda3/Scripts/conda.exe",
+  "python-envs.defaultEnvManager": "ms-python.python:conda",
+  "python-envs.defaultPackageManager": "ms-python.python:conda",
+  "python.terminal.activateEnvironment": false
+}
