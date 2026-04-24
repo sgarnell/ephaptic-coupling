@@ -148,17 +148,3 @@ Pull requests are welcome — especially for:
 
 Maintainer: **Saul Garnell**  
 For questions or collaboration, open an issue or reach out directly.
-
-```
-
----
-
-If you want, I can also generate:
-
-- A `LICENSE` file  
-- A `.gitignore`  
-- A `requirements.txt`  
-- A `scripts/` folder scaffold  
-- A PyVista visualization notebook  
-
-Just tell me what you want to add next.
