@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from visualization.utils import (
+from ephaptic_coupling.visualization.utils import (
     load_layer_npz,
     load_all_layers,
     get_layer_points,

@@ -1,4 +1,4 @@
-"""Pytest suite for animation.py – Phase 4 traveling-wave modulation."""
+"""Pytest suite for animation.py - Phase 4 traveling-wave modulation."""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ import numpy as np
 import pytest
 import pyvista as pv
 
-from visualization.animation import (
+from ephaptic_coupling.visualization.animation import (
     AnimationConfig,
+    _build_animation_scene,
     compute_brightness_at_point,
     generate_frame,
 )
@@ -31,11 +32,8 @@ class _MockPlotter:
         pass  # no-op for tests
 
 
-def _make_mesh(
-    points: list[tuple[float, float, float]],
-    base_rgb: tuple[float, float, float],
-) -> pv.PolyData:
-    """Create a PolyData mesh with given points and initial placeholder colours."""
+def _make_mesh(points: list[tuple[float, float, float]]) -> pv.PolyData:
+    """Create a PolyData mesh with given points and placeholder colours."""
     arr = np.array(points, dtype=np.float32)
     mesh = pv.PolyData(arr)
     n = len(arr)
@@ -43,10 +41,53 @@ def _make_mesh(
     return mesh
 
 
-def _colors_as_set(mesh: pv.PolyData) -> set[tuple[float, ...]]:
-    """Return unique RGB colours in the mesh as a set of tuples for comparison."""
-    arr = mesh.point_data["colors"]
-    return set(tuple(row) for row in arr)
+def _rgb_rows_to_hsv(colors: np.ndarray) -> np.ndarray:
+    """Convert an RGB array to an HSV array row by row."""
+    return np.asarray(
+        [colorsys.rgb_to_hsv(float(r), float(g), float(b)) for r, g, b in colors],
+        dtype=np.float64,
+    )
+
+
+def _assert_hue_and_saturation_preserved(
+    mesh: pv.PolyData,
+    base_rgb: tuple[float, float, float],
+    atol: float = 1e-6,
+) -> None:
+    """Check that every point keeps the layer hue and saturation."""
+    base_h, base_s, _ = colorsys.rgb_to_hsv(*base_rgb)
+    hsv = _rgb_rows_to_hsv(np.asarray(mesh.point_data["colors"], dtype=np.float64))
+    assert np.allclose(hsv[:, 0], base_h, atol=atol), (
+        f"Hue changed away from {base_h:.6f}: {hsv[:, 0][:5]}"
+    )
+    assert np.allclose(hsv[:, 1], base_s, atol=atol), (
+        f"Saturation changed away from {base_s:.6f}: {hsv[:, 1][:5]}"
+    )
+
+
+def _find_phase_shift_pair(projected_s: np.ndarray, delta_s: float) -> tuple[int, int, float]:
+    """Find a pair of points whose projected distance matches the target shift."""
+    projected = np.asarray(projected_s, dtype=np.float64)
+    order = np.argsort(projected)
+    sorted_projected = projected[order]
+    targets = sorted_projected - delta_s
+    insert_positions = np.searchsorted(sorted_projected, targets)
+
+    lower_positions = np.clip(insert_positions - 1, 0, len(sorted_projected) - 1)
+    upper_positions = np.clip(insert_positions, 0, len(sorted_projected) - 1)
+
+    lower_diffs = np.abs(sorted_projected[lower_positions] - targets)
+    upper_diffs = np.abs(sorted_projected[upper_positions] - targets)
+    choose_lower = lower_diffs <= upper_diffs
+
+    source_position = int(np.argmin(np.minimum(lower_diffs, upper_diffs)))
+    target_position = int(
+        lower_positions[source_position]
+        if choose_lower[source_position]
+        else upper_positions[source_position]
+    )
+    error = float(min(lower_diffs[source_position], upper_diffs[source_position]))
+    return int(order[source_position]), int(order[target_position]), error
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +121,7 @@ class TestComputeBrightnessAtPoint:
             amplitude=0.0,
             wavelength=1.0,
             wave_direction=(1.0, 0.0, 0.0),
+            velocity=1.0,
             frequency=1.0,
             phase_offset=0.0,
         )
@@ -96,6 +138,7 @@ class TestComputeBrightnessAtPoint:
             amplitude=0.5,
             wavelength=1.0,
             wave_direction=(0.0, 0.0, 1.0),
+            velocity=1.0,
             frequency=0.0,
             phase_offset=0.0,
         )
@@ -103,6 +146,7 @@ class TestComputeBrightnessAtPoint:
             amplitude=0.5,
             wavelength=1.0,
             wave_direction=(0.0, 0.0, 1.0),
+            velocity=1.0,
             frequency=0.0,
             phase_offset=math.pi / 2,
         )
@@ -126,6 +170,7 @@ class TestComputeBrightnessAtPoint:
             amplitude=0.5,
             wavelength=0.1,
             wave_direction=(1.0, 0.0, 0.0),
+            velocity=1.0,
             frequency=0.0,
             phase_offset=0.0,
         )
@@ -133,6 +178,7 @@ class TestComputeBrightnessAtPoint:
             amplitude=0.5,
             wavelength=10.0,
             wave_direction=(1.0, 0.0, 0.0),
+            velocity=1.0,
             frequency=0.0,
             phase_offset=0.0,
         )
@@ -156,6 +202,7 @@ class TestComputeBrightnessAtPoint:
             amplitude=0.5,
             wavelength=1.0,
             wave_direction=(0.0, 0.0, 5.0),  # length 5, same as (0,0,1)
+            velocity=1.0,
             frequency=0.0,
             phase_offset=0.0,
         )
@@ -163,6 +210,7 @@ class TestComputeBrightnessAtPoint:
             amplitude=0.5,
             wavelength=1.0,
             wave_direction=(0.0, 0.0, 1.0),
+            velocity=1.0,
             frequency=0.0,
             phase_offset=0.0,
         )
@@ -182,21 +230,47 @@ class TestComputeBrightnessAtPoint:
         with pytest.raises(ValueError, match="wave_direction cannot be the zero vector"):
             compute_brightness_at_point(p, 0.0, cfg)
 
-    def test_time_evolution(self) -> None:
-        """At times separated by period T=1/f, same point should have same brightness."""
+    def test_velocity_controls_time_phase(self) -> None:
+        """A full propagation period should repeat the brightness."""
         cfg = AnimationConfig(
             amplitude=0.5,
-            wavelength=1.0,
+            wavelength=2.0,
             wave_direction=(0.0, 0.0, 1.0),
-            frequency=2.0,  # period = 0.5 s
+            velocity=4.0,
+            frequency=11.0,
             phase_offset=0.0,
         )
-        p = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-        T = 1.0 / cfg.frequency
+        p = np.array([0.0, 0.0, 0.25], dtype=np.float64)
+        T = cfg.wavelength / cfg.velocity
         b1 = compute_brightness_at_point(p, 0.0, cfg)
         b2 = compute_brightness_at_point(p, T, cfg)
         assert math.isclose(b1, b2, rel_tol=1e-9), (
-            f"Expected periodicity, got {b1} and {b2} at t=0 and t={T}"
+            f"Expected repetition after one propagation period, got {b1} and {b2}"
+        )
+
+    def test_frequency_is_ignored(self) -> None:
+        """Changing frequency must not alter traveling-wave brightness."""
+        cfg_low = AnimationConfig(
+            amplitude=0.5,
+            wavelength=2.0,
+            wave_direction=(1.0, 0.0, 0.0),
+            velocity=3.0,
+            frequency=0.25,
+            phase_offset=0.0,
+        )
+        cfg_high = AnimationConfig(
+            amplitude=0.5,
+            wavelength=2.0,
+            wave_direction=(1.0, 0.0, 0.0),
+            velocity=3.0,
+            frequency=99.0,
+            phase_offset=0.0,
+        )
+        p = np.array([0.2, 0.0, 0.0], dtype=np.float64)
+        b_low = compute_brightness_at_point(p, 0.4, cfg_low)
+        b_high = compute_brightness_at_point(p, 0.4, cfg_high)
+        assert math.isclose(b_low, b_high, rel_tol=1e-9), (
+            f"Frequency should be ignored, got {b_low} and {b_high}"
         )
 
 
@@ -205,125 +279,164 @@ class TestComputeBrightnessAtPoint:
 # ---------------------------------------------------------------------------
 
 
-class TestGenerateFrame:
-    """Integration tests using real pv.PolyData meshes."""
+class TestTravelingWaveFramePath:
+    """Integration tests for the cached traveling-wave frame path."""
 
-    BASE_RGB = (1.0, 0.5, 0.2)  # distinct colour, non-zero saturation, hue
-
-    @staticmethod
-    def _hsv_from_rgb(rgb: tuple[float, float, float]) -> tuple[float, float, float]:
-        return colorsys.rgb_to_hsv(*rgb)
-
-    def test_per_point_colours_are_different(self) -> None:
-        """Points at different positions should get different RGB values."""
-        plotter = _MockPlotter()
-        base_rgb = (0.5, 0.25, 0.1)  # V < 1 so clamping doesn't mask differences
-        points = [(0.0, 0.0, 0.0), (0.25, 0.0, 0.0)]
-        mesh = _make_mesh(points, base_rgb)
-        plotter._anim_meshes.append((mesh, base_rgb))
-        cfg = AnimationConfig(
-            amplitude=0.5,
-            wavelength=1.0,
+    @pytest.fixture
+    def scene_cfg(self):
+        config = AnimationConfig(
+            mode="traveling_wave",
+            duration=1.0,
+            fps=10,
+            amplitude=0.45,
+            frequency=123.0,
+            wavelength=50.0,
+            velocity=1.0,
             wave_direction=(1.0, 0.0, 0.0),
-            frequency=0.0,
+            phase_offset=0.25,
+            layer_coupling=0.0,
         )
-        generate_frame(plotter, 0.0, cfg)
-        colors = _colors_as_set(mesh)
-        assert len(colors) == 2, f"Expected 2 distinct colours, got {len(colors)}"
+        plotter = _build_animation_scene([1, 5, 9], off_screen=True, config=config)
+        yield plotter, config
+        plotter.close()
 
-    def test_colours_stay_within_valid_rgb(self) -> None:
-        """Generated RGB values must be in [0, 1]."""
-        plotter = _MockPlotter()
-        points = [(0.0, 0.0, 0.0), (0.2, 0.1, 0.3), (10.0, -5.0, 3.0)]
-        mesh = _make_mesh(points, self.BASE_RGB)
-        plotter._anim_meshes.append((mesh, self.BASE_RGB))
-        cfg = AnimationConfig(
-            amplitude=2.0,  # large amplitude to push beyond limits
-            wavelength=1.0,
-            wave_direction=(1.0, 1.0, 1.0),
-            frequency=1.0,
+    @pytest.fixture
+    def static_scene_cfg(self):
+        config = AnimationConfig(
+            mode="traveling_wave",
+            duration=1.0,
+            fps=10,
+            amplitude=0.45,
+            frequency=123.0,
+            wavelength=50.0,
+            velocity=0.0,
+            wave_direction=(1.0, 0.0, 0.0),
+            phase_offset=0.25,
+            layer_coupling=0.0,
         )
-        generate_frame(plotter, 0.0, cfg)
-        color_array = mesh.point_data["colors"]
-        assert np.all(color_array >= 0.0) and np.all(color_array <= 1.0), (
-            "RGB values must be clamped to [0, 1]"
+        plotter = _build_animation_scene([1, 5, 9], off_screen=True, config=config)
+        yield plotter, config
+        plotter.close()
+
+    @pytest.fixture
+    def single_layer_scene(self):
+        config = AnimationConfig(
+            mode="traveling_wave",
+            duration=1.0,
+            fps=10,
+            amplitude=0.45,
+            frequency=17.0,
+            wavelength=50.0,
+            velocity=1.0,
+            wave_direction=(1.0, 0.0, 0.0),
+            phase_offset=0.25,
+            layer_coupling=0.0,
+        )
+        plotter = _build_animation_scene([5], off_screen=True, config=config)
+        yield plotter, config
+        plotter.close()
+
+    def test_hue_and_saturation_preserved_across_frames(self, scene_cfg) -> None:
+        """Every point must keep its layer hue and saturation over time."""
+        plotter, config = scene_cfg
+        times = [0.0, 0.08, 0.17, 0.31]
+
+        for t in times:
+            generate_frame(plotter, t=t, config=config)
+            for mesh, base_rgb in plotter._anim_meshes:
+                _assert_hue_and_saturation_preserved(mesh, base_rgb)
+
+    def test_hue_and_saturation_survive_clamping(self) -> None:
+        """Clipping the value channel high must still preserve hue and saturation."""
+        config = AnimationConfig(
+            mode="traveling_wave",
+            amplitude=0.95,
+            frequency=42.0,
+            wavelength=50.0,
+            velocity=1.0,
+            wave_direction=(1.0, 0.0, 0.0),
+            phase_offset=math.pi / 2,
+        )
+        plotter = _build_animation_scene([5], off_screen=True, config=config)
+        try:
+            mesh, base_rgb = plotter._anim_meshes[0]
+            generate_frame(plotter, t=0.0, config=config)
+            assert np.max(mesh.point_data["colors"]) <= 1.0 + 1e-6
+            _assert_hue_and_saturation_preserved(mesh, base_rgb, atol=1e-5)
+        finally:
+            plotter.close()
+
+    def test_frequency_is_ignored_by_traveling_wave_frames(self, scene_cfg) -> None:
+        """Changing frequency must not alter traveling-wave frame output."""
+        plotter, config = scene_cfg
+        mesh_snapshots = []
+
+        generate_frame(plotter, t=0.23, config=config)
+        for mesh, _ in plotter._anim_meshes:
+            mesh_snapshots.append(np.array(mesh.point_data["colors"], copy=True))
+
+        alt_config = AnimationConfig(
+            mode="traveling_wave",
+            amplitude=config.amplitude,
+            frequency=0.001,
+            wavelength=config.wavelength,
+            velocity=config.velocity,
+            wave_direction=config.wave_direction,
+            phase_offset=config.phase_offset,
+            layer_coupling=config.layer_coupling,
+        )
+        generate_frame(plotter, t=0.23, config=alt_config)
+        for snapshot, (mesh, _) in zip(mesh_snapshots, plotter._anim_meshes):
+            assert np.allclose(snapshot, mesh.point_data["colors"], atol=1e-6)
+
+    def test_velocity_zero_produces_static_pattern(self, static_scene_cfg) -> None:
+        """When velocity is zero, the traveling-wave frame must be time invariant."""
+        plotter, config = static_scene_cfg
+
+        generate_frame(plotter, t=0.0, config=config)
+        first = [np.array(mesh.point_data["colors"], copy=True) for mesh, _ in plotter._anim_meshes]
+
+        generate_frame(plotter, t=0.73, config=config)
+        second = [np.array(mesh.point_data["colors"], copy=True) for mesh, _ in plotter._anim_meshes]
+
+        for before, after in zip(first, second):
+            assert np.allclose(before, after, atol=1e-6)
+
+    def test_phase_advance_matches_wave_speed(self, single_layer_scene) -> None:
+        """Brightness should shift by omega * dt over time."""
+        plotter, config = single_layer_scene
+        mesh, _ = plotter._anim_meshes[0]
+        projected_s = np.asarray(plotter._anim_records[0]["projected_s"], dtype=np.float64)
+
+        dt = 0.008
+        delta_s = float(plotter._wave_omega) * dt
+        i, j, error = _find_phase_shift_pair(projected_s, delta_s)
+        assert error < 1e-4, f"No stable point pair found for delta_s={delta_s}: error={error}"
+
+        generate_frame(plotter, t=0.0, config=config)
+        colors_t0 = np.array(mesh.point_data["colors"], copy=True)
+        generate_frame(plotter, t=dt, config=config)
+        colors_t1 = np.array(mesh.point_data["colors"], copy=True)
+
+        assert np.allclose(colors_t1[i], colors_t0[j], atol=1e-5), (
+            f"Expected spatial phase shift to match wave speed, got {colors_t1[i]} vs {colors_t0[j]}"
         )
 
-    def test_v_channel_clamping(self) -> None:
-        """When brightness > 1/v, v_new must be clamped at 1.0 (no overshoot)."""
-        plotter = _MockPlotter()
-        # Use a colour whose V > 1 / (1 + amplitude) so clamping engages.
-        # B_max = 1 + 0.9 = 1.9, so need v0 > 1/1.9 ≈ 0.526.
-        base_rgb = (0.0, 0.6, 0.0)  # HSV: v = 0.6
-        h0, s0, v0 = colorsys.rgb_to_hsv(*base_rgb)
-        assert v0 > 0.52, f"Test setup requires V > 0.526, got {v0}"
-        points = [(0.0, 0.0, 0.0)]
-        mesh = _make_mesh(points, base_rgb)
-        plotter._anim_meshes.append((mesh, base_rgb))
-        cfg = AnimationConfig(
-            amplitude=0.9,
-            wavelength=100.0,
-            wave_direction=(0.0, 0.0, 1.0),
-            frequency=0.0,
-            phase_offset=math.pi / 2,  # sin(π/2)=1 → B=1.9
-        )
-        generate_frame(plotter, 0.0, cfg)
-        r, g, b = mesh.point_data["colors"][0]
-        h_new, s_new, v_new = colorsys.rgb_to_hsv(r, g, b)
-        # v_new should be clamped to 1.0
-        assert math.isclose(v_new, 1.0, rel_tol=1e-6), (
-            f"V channel should clamp at 1.0, got {v_new}"
-        )
-        # hue and saturation should be preserved
-        assert math.isclose(h_new, h0, rel_tol=1e-6), (
-            f"Hue changed {h0} -> {h_new}"
-        )
-        assert math.isclose(s_new, s0, rel_tol=1e-6), (
-            f"Saturation changed {s0} -> {s_new}"
-        )
 
-    def test_hue_and_saturation_preserved(self) -> None:
-        """Vary brightness but check that H and S remain identical to base."""
-        plotter = _MockPlotter()
-        points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
-        mesh = _make_mesh(points, self.BASE_RGB)
-        plotter._anim_meshes.append((mesh, self.BASE_RGB))
-        cfg = AnimationConfig(
-            amplitude=0.8,
-            wavelength=2.0,
-            wave_direction=(0.0, 1.0, 0.0),
-            frequency=1.0,
-        )
-        h_base, s_base, v_base = colorsys.rgb_to_hsv(*self.BASE_RGB)
-        generate_frame(plotter, 0.3, cfg)
-        for row in mesh.point_data["colors"]:
-            h, s, v = colorsys.rgb_to_hsv(*row)
-            assert math.isclose(h, h_base, rel_tol=1e-6), f"Hue changed to {h}"
-            assert math.isclose(s, s_base, rel_tol=1e-6), f"Saturation changed to {s}"
+class TestTravelingWaveNoColorsysFallback:
+    """The traveling-wave path should fail fast when its cache is missing."""
 
-    def test_multiple_meshes_update_independently(self) -> None:
-        """Two meshes with different base colours should both be updated."""
+    def test_missing_anim_records_raises_runtime_error(self) -> None:
         plotter = _MockPlotter()
-        rgb1 = (0.8, 0.2, 0.1)
-        rgb2 = (0.1, 0.7, 0.3)
-        mesh1 = _make_mesh([(0.0, 0.0, 0.0)], rgb1)
-        mesh2 = _make_mesh([(0.0, 0.0, 0.0)], rgb2)
-        plotter._anim_meshes.append((mesh1, rgb1))
-        plotter._anim_meshes.append((mesh2, rgb2))
+        mesh = _make_mesh([(0.0, 0.0, 0.0)])
+        plotter._anim_meshes.append((mesh, (1.0, 0.5, 0.2)))
         cfg = AnimationConfig(
+            mode="traveling_wave",
             amplitude=0.5,
-            wavelength=10.0,
-            wave_direction=(0.0, 0.0, 1.0),
-            frequency=0.0,
+            wavelength=1.0,
+            velocity=1.0,
+            wave_direction=(1.0, 0.0, 0.0),
         )
-        generate_frame(plotter, 0.0, cfg)
-        c1 = tuple(mesh1.point_data["colors"][0])
-        c2 = tuple(mesh2.point_data["colors"][0])
-        assert c1 != c2, f"Different base colours should yield different results: {c1}, {c2}"
-        # Each should preserve its own hue
-        h1, _, _ = colorsys.rgb_to_hsv(*c1)
-        h1_base, _, _ = colorsys.rgb_to_hsv(*rgb1)
-        assert math.isclose(h1, h1_base, rel_tol=1e-6)
-        h2, _, _ = colorsys.rgb_to_hsv(*c2)
-        h2_base, _, _ = colorsys.rgb_to_hsv(*rgb2)
-        assert math.isclose(h2, h2_base, rel_tol=1e-6)
+
+        with pytest.raises(RuntimeError, match="_anim_records"):
+            generate_frame(plotter, 0.0, cfg)

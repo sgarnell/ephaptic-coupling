@@ -23,13 +23,6 @@ import argparse
 import sys
 from pathlib import Path
 
-# Ensure the project root (parent of tests/) is on sys.path so that
-# `visualization` is importable when the script is run directly:
-#   python tests/phase2_manualtest.py ...
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -216,7 +209,7 @@ def main(argv: list[str] | None = None) -> None:
     # ------------------------------------------------------------------
     # Lazy import so that argparse --help works without pyvista installed.
     # ------------------------------------------------------------------
-    from visualization.viewer import (
+    from ephaptic_coupling.visualization.viewer import (
         build_scene,
         set_camera_oblique,
         set_camera_side,
@@ -250,7 +243,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Layer colour legend
     if args.show_legend:
-        from visualization.colors import LAYER_COLORS
+        from ephaptic_coupling.visualization.colors import LAYER_COLORS
         legend_entries = [[f"FB{n}", LAYER_COLORS[n]] for n in layers]
         plotter.add_legend(
             legend_entries,

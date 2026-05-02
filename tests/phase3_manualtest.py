@@ -22,12 +22,10 @@ import argparse
 import sys
 from pathlib import Path
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+import numpy as np
 
-from visualization.animation import AnimationConfig, _build_animation_scene, generate_frame
-from visualization.viewer import set_camera_oblique, set_camera_side, set_camera_top
+from ephaptic_coupling.visualization.animation import AnimationConfig, _build_animation_scene, generate_frame
+from ephaptic_coupling.visualization.viewer import set_camera_oblique, set_camera_side, set_camera_top
 
 ALL_LAYERS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 CAMERA_PRESETS = ("top", "side", "oblique")
@@ -116,6 +114,60 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="PX",
         help="Point size in pixels. Default: 5.",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["global_pulse", "traveling_wave"],
+        default="global_pulse",
+        help=(
+            "Animation mode: global_pulse (Phase 3) or traveling_wave (Phase 4). "
+            "Default: global_pulse."
+        ),
+    )
+    parser.add_argument(
+        "--wave-direction",
+        nargs=3,
+        type=float,
+        default=[1.0, 0.0, 0.0],
+        metavar=("X", "Y", "Z"),
+        help=(
+            "Wave propagation direction vector used in traveling_wave mode. "
+            "Default: 1.0 0.0 0.0."
+        ),
+    )
+    parser.add_argument(
+        "--wavelength",
+        type=float,
+        default=100.0,
+        metavar="FLOAT",
+        help=(
+            "Spatial period of the wave in scene units used in traveling_wave mode. "
+            "Default: 100.0."
+        ),
+    )
+    parser.add_argument(
+        "--velocity",
+        type=float,
+        default=1.0,
+        metavar="FLOAT",
+        help=(
+            "Propagation speed along the wave direction used in traveling_wave mode. "
+            "Default: 1.0."
+        ),
+    )
+    parser.add_argument(
+        "--phase-offset",
+        type=float,
+        default=0.0,
+        metavar="RADIANS",
+        help="Global phase offset in radians used in traveling_wave mode. Default: 0.0.",
+    )
+    parser.add_argument(
+        "--layer-coupling",
+        type=float,
+        default=0.0,
+        metavar="SEC",
+        help="Per-layer delay step in seconds used in traveling_wave mode. Default: 0.0.",
+    )
 
     return parser.parse_args(argv)
 
@@ -140,6 +192,30 @@ def resolve_layers(raw: list[str]) -> list[int]:
     return sorted(set(layers))
 
 
+def _validate_wave_parameters(
+    mode: str,
+    wave_direction: tuple[float, float, float],
+    wavelength: float,
+    velocity: float,
+) -> None:
+    """Validate Phase 4 wave arguments when traveling-wave mode is selected."""
+    if mode != "traveling_wave":
+        return
+
+    direction_array = np.asarray(wave_direction, dtype=np.float64)
+    if np.linalg.norm(direction_array) == 0:
+        print("[error] --wave-direction cannot be the zero vector.")
+        sys.exit(1)
+
+    if not np.isfinite(wavelength) or wavelength <= 0:
+        print("[error] --wavelength must be finite and greater than 0.")
+        sys.exit(1)
+
+    if not np.isfinite(velocity):
+        print("[error] --velocity must be finite.")
+        sys.exit(1)
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     layers = resolve_layers(args.layers)
@@ -154,19 +230,44 @@ def main(argv: list[str] | None = None) -> None:
         print("[error] --window width and height must be > 0")
         sys.exit(1)
 
+    _validate_wave_parameters(
+        mode=args.mode,
+        wave_direction=tuple(args.wave_direction),
+        wavelength=args.wavelength,
+        velocity=args.velocity,
+    )
+
     config = AnimationConfig(
         duration=args.duration,
         fps=args.fps,
         amplitude=args.amplitude,
         frequency=args.frequency,
+        mode=args.mode,
+        wave_direction=tuple(args.wave_direction),
+        wavelength=args.wavelength,
+        velocity=args.velocity,
+        phase_offset=args.phase_offset,
+        layer_coupling=args.layer_coupling,
     )
 
     print(f"Layers     : {layers}")
     print(f"Camera     : {args.camera}")
     print(f"Duration   : {args.duration} s")
     print(f"FPS        : {args.fps}")
+    print(f"Mode       : {args.mode}")
+    if args.mode == "global_pulse":
+        print(f"Frequency  : {args.frequency} Hz (used)")
+    else:
+        wave_dir_str = " ".join(f"{v:.3f}" for v in args.wave_direction)
+        print(f"Wave dir   : ({wave_dir_str})")
+        print(f"Wavelength : {args.wavelength}")
+        print(f"Velocity   : {args.velocity}")
+        print(f"Phase off  : {args.phase_offset:.3f} rad")
+        print(
+            f"Layer coupl: {args.layer_coupling:.3f} s "
+            f"(ignored: frequency={args.frequency} Hz)"
+        )
     print(f"Amplitude  : {args.amplitude}")
-    print(f"Frequency  : {args.frequency} Hz")
     print(f"Background : {args.bg!r}")
     print(f"Window     : {args.window[0]} x {args.window[1]}")
     print(f"Point size : {args.point_size} px")
@@ -226,8 +327,14 @@ def main(argv: list[str] | None = None) -> None:
         else:
             mode = "PAUSED"
         loop_str = "ON" if state["loop"] else "OFF"
+        if config.mode == "global_pulse":
+            mode_summary = f"global_pulse (f={config.frequency:.2f}Hz)"
+        else:
+            mode_summary = (
+                f"traveling_wave (v={config.velocity:.2f}, λ={config.wavelength:.1f})"
+            )
         hud.SetInput(
-            f"Phase 3 Animation  |  {mode}  |  frame {state['frame']}/{n_frames}  |  t={t:0.2f}s  |  loop={loop_str}"
+            f"Phase 4 Animation  |  {mode}  |  {mode_summary}  |  frame {state['frame']}/{n_frames}  |  t={t:0.2f}s  |  loop={loop_str}"
         )
 
     _refresh_hud()

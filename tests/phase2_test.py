@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import pyvista as pv
 
-from visualization.viewer import (
+from ephaptic_coupling.visualization.viewer import (
     build_layer_mesh,
     build_scene,
     show_scene,
@@ -25,7 +25,7 @@ from visualization.viewer import (
     set_camera_side,
     set_camera_oblique,
 )
-from visualization.colors import get_layer_color, LAYER_COLORS
+from ephaptic_coupling.visualization.colors import get_layer_color, LAYER_COLORS
 
 
 # ---------------------------------------------------------------------------

@@ -20,18 +20,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-
-from visualization.animation import (
+from ephaptic_coupling.visualization.animation import (
     AnimationConfig,
     _build_animation_scene,
     export_animation,
     generate_frame,
     play_animation,
 )
-from visualization.colors import get_layer_color
+from ephaptic_coupling.visualization.colors import get_layer_color
 
 
 # ---------------------------------------------------------------------------
